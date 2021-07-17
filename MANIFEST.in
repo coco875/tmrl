@@ -1,3 +1,9 @@
 include tools/*
 exclude tmrl/data/*
 exclude tmrl/wandb/*
+
+
+
+make the config.py
+write the yaml file
+add parser
