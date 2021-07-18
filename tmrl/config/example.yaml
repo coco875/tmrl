@@ -18,3 +18,288 @@
      count: 1
      location: "a pear tree"
    turtle-doves: two
+
+
+
+
+
+
+# MODEL, GYM ENVIRONMENT, REPLAY MEMORY AND TRAINING: ===========
+
+if cfg.PRAGMA_DCAC:
+    TRAIN_MODEL = SV_Mlp
+    POLICY = SV_MlpPolicy
+else:
+    # TRAIN_MODEL = Mlp if cfg.PRAGMA_LIDAR else Tm_hybrid_1
+    # POLICY = MlpPolicy if cfg.PRAGMA_LIDAR else TMPolicy
+    assert cfg.PRAGMA_LIDAR
+    # TRAIN_MODEL = MLPActorCritic
+    # POLICY = SquashedGaussianMLPActor
+    TRAIN_MODEL = RNNActorCritic
+    POLICY = SquashedGaussianRNNActor
+
+if cfg.PRAGMA_LIDAR:
+    INT = partial(TM2020InterfaceLidar, img_hist_len=cfg.IMG_HIST_LEN, gamepad=cfg.PRAGMA_GAMEPAD) if cfg.PRAGMA_TM2020_TMNF else partial(TMInterfaceLidar, img_hist_len=cfg.IMG_HIST_LEN)
+else:
+    INT = partial(TM2020Interface, img_hist_len=cfg.IMG_HIST_LEN, gamepad=cfg.PRAGMA_GAMEPAD) if cfg.PRAGMA_TM2020_TMNF else partial(TMInterface, img_hist_len=cfg.IMG_HIST_LEN)
+
+CONFIG_DICT = rtgym.DEFAULT_CONFIG_DICT
+CONFIG_DICT["interface"] = INT
+CONFIG_DICT["time_step_duration"] = 0.05
+CONFIG_DICT["start_obs_capture"] = 0.04  # /!\ lidar capture takes 0.03s
+CONFIG_DICT["time_step_timeout_factor"] = 1.0
+CONFIG_DICT["ep_max_length"] = np.inf
+CONFIG_DICT["real_time"] = True
+CONFIG_DICT["async_threading"] = True
+CONFIG_DICT["act_in_obs"] = True  # ACT_IN_OBS
+CONFIG_DICT["act_buf_len"] = cfg.ACT_BUF_LEN
+CONFIG_DICT["benchmark"] = cfg.BENCHMARK
+CONFIG_DICT["wait_on_done"] = True
+
+# to compress a sample before sending it over the local network/Internet:
+SAMPLE_COMPRESSOR = get_local_buffer_sample_lidar if cfg.PRAGMA_LIDAR else get_local_buffer_sample_tm20_imgs
+# to preprocess observations that come out of the gym environment and of the replay buffer:
+OBS_PREPROCESSOR = obs_preprocessor_tm_lidar_act_in_obs if cfg.PRAGMA_LIDAR else obs_preprocessor_tm_act_in_obs
+# to augment data that comes out of the replay buffer (applied after observation preprocessing):
+SAMPLE_PREPROCESSOR = None
+
+if cfg.PRAGMA_LIDAR:
+    # MEM = TrajMemoryTMNFLidar if cfg.PRAGMA_DCAC else MemoryTMNFLidar
+    MEM = TrajMemoryTMNFLidar if cfg.PRAGMA_DCAC else SeqMemoryTMNFLidar
+else:
+    assert not cfg.PRAGMA_DCAC, "DCAC not implemented here"
+    MEM = MemoryTM2020RAM if cfg.PRAGMA_TM2020_TMNF else MemoryTMNF
+
+MEMORY = partial(MEM, path_loc=cfg.DATASET_PATH, imgs_obs=cfg.IMG_HIST_LEN, act_buf_len=cfg.ACT_BUF_LEN, sample_preprocessor=None if cfg.PRAGMA_DCAC else SAMPLE_PREPROCESSOR, crc_debug=cfg.CRC_DEBUG)
+
+# ALGORITHM: ===================================================
+
+if cfg.PRAGMA_DCAC:  # DCAC
+    AGENT = partial(
+        DCAC_Agent,
+        Interface=Tm20rtgymDcacInterface,
+        OutputNorm=partial(beta=0., zero_debias=False),
+        device='cuda' if cfg.PRAGMA_CUDA_TRAINING else 'cpu',
+        Model=partial(TRAIN_MODEL, act_buf_len=cfg.ACT_BUF_LEN),
+        lr_actor=0.0003,
+        lr_critic=0.0003,  # default 0.0003
+        discount=0.995,  # default and best tmnf so far: 0.99
+        target_update=0.005,
+        reward_scale=2.0,  # 2.0,  # default: 5.0, best tmnf so far: 0.1, best tm20 so far: 2.0
+        entropy_scale=1.0)  # default: 1.0),  # default: 1.0
+else:  # SAC
+    # AGENT = partial(
+    #     SAC_Agent,
+    #     OutputNorm=partial(beta=0., zero_debias=False),
+    #     device='cuda' if cfg.PRAGMA_CUDA_TRAINING else 'cpu',
+    #     Model=partial(TRAIN_MODEL, act_buf_len=cfg.ACT_BUF_LEN),
+    #     lr_actor=0.0003,
+    #     lr_critic=0.0001,  # default 0.0003
+    #     discount=0.995,  # default and best tmnf so far: 0.99
+    #     target_update=0.001,  # default 0.005
+    #     reward_scale=2.0,  # 2.0,  # default: 5.0, best tmnf so far: 0.1, best tm20 so far: 2.0
+    #     entropy_scale=1.0)  # default: 1.0),  # default: 1.0
+
+    AGENT = partial(
+        SAC_Agent,
+        device='cuda' if cfg.PRAGMA_CUDA_TRAINING else 'cpu',
+        Model=partial(TRAIN_MODEL, act_buf_len=cfg.ACT_BUF_LEN),
+        lr_actor=0.0003,
+        lr_critic=0.00005,  # 0.0001 # default 0.0003
+        lr_entropy=0.0003,
+        gamma=0.995,  # default and best tmnf so far: 0.99
+        polyak=0.995,  # 0.999 # default 0.995
+        learn_entropy_coef=False,  # False for SAC v2 with no temperature autotuning
+        target_entropy=-7.0,  # None for automatic
+        alpha=1.0 / 2.7)  # best: 1 / 2.5  # inverse of reward scale
+
+# TRAINER: =====================================================
+
+
+def sac_v2_entropy_scheduler(agent, epoch):
+    start_ent = -0.0
+    end_ent = -7.0
+    end_epoch = 200
+    if epoch <= end_epoch:
+        agent.entopy_target = start_ent + (end_ent - start_ent) * epoch / end_epoch
+
+
+if cfg.PRAGMA_LIDAR:  # lidar
+    TRAINER = partial(
+        TrainingOffline,
+        Env=partial(UntouchedGymEnv, id="rtgym:real-time-gym-v0", gym_kwargs={"config": CONFIG_DICT}),
+        Memory=MEMORY,
+        memory_size=1000000,
+        batchsize=128,  # RTX3080: 256 up to 1024
+        epochs=10000,  # 400
+        rounds=1,  # 10
+        steps=100,  # 1000
+        update_model_interval=1000,
+        update_buffer_interval=1000,
+        max_training_steps_per_env_step=4.0,  # 1.0
+        profiling=cfg.PROFILE_TRAINER,
+        Agent=AGENT,
+        agent_scheduler=None,  # sac_v2_entropy_scheduler
+        start_training=0)  # set this > 0 to start from an existing policy (fills the buffer up to this number of samples before starting training)
+else:  # images
+    TRAINER = partial(
+        TrainingOffline,
+        Env=partial(UntouchedGymEnv, id="rtgym:real-time-gym-v0", gym_kwargs={"config": CONFIG_DICT}),
+        Memory=MEMORY,
+        memory_size=1000000,
+        batchsize=128,  # 128
+        epochs=100000,  # 10
+        rounds=10,  # 50
+        steps=50,  # 2000
+        update_model_interval=50,
+        update_buffer_interval=1,
+        max_training_steps_per_env_step=1.0,
+        profiling=cfg.PROFILE_TRAINER,
+        Agent=AGENT)
+
+# CHECKPOINTS: ===================================================
+
+DUMP_RUN_INSTANCE_FN = None if cfg.PRAGMA_LIDAR else None  # dump_run_instance_images_dataset
+LOAD_RUN_INSTANCE_FN = None if cfg.PRAGMA_LIDAR else None  # load_run_instance_images_dataset
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# standard library imports
+import os
+from pathlib import Path
+
+# HIGH-LEVEL PRAGMAS: ==========================================
+
+PRAGMA_EDOUARD_YANN_CC = 3  # 3 if MISTlab RTX3080, 2 if ComputeCanada, 1 if Edouard, 0 if Yann  # TODO: remove for release
+PRAGMA_SERVER_ON_EDOUARD_YANN = 0  # 1 is server on Edouard's PC, 0 if server on Yann's PC
+RUN_NAME = "SACv1_SPINUP_1_LIDAR_RNN_old_map_test_4"
+
+BUFFERS_MAXLEN = 2000  # Maximum length of the local buffers for RolloutWorkers, Server and TrainerInterface
+RW_MAX_SAMPLES_PER_EPISODE = 1000  # If this number of timesteps is reached, the RolloutWorker will reset the episode
+
+PRAGMA_TM2020_TMNF = True  # True if TM2020, False if TMNF
+PRAGMA_LIDAR = True  # True if Lidar, False if images
+PRAGMA_CUDA_TRAINING = True  # True if CUDA, False if CPU (trainer)
+PRAGMA_CUDA_INFERENCE = False  # True if CUDA, False if CPU (rollout worker)
+
+PRAGMA_GAMEPAD = True  # True to use gamepad, False to use keyboard
+
+CONFIG_COGNIFLY = False  # if True, will override config with Cognifly's config
+
+PRAGMA_DCAC = False  # True for DCAC, False for SAC
+
+LOCALHOST_WORKER = True  # set to True for RolloutWorkers on the same machine as the Server
+PUBLIC_IP_REDIS = "173.179.182.4" if PRAGMA_SERVER_ON_EDOUARD_YANN else "45.74.221.204"  # IP Edouard
+
+REDIS_IP_FOR_WORKER = PUBLIC_IP_REDIS if not LOCALHOST_WORKER else "127.0.0.1"
+REDIS_IP_FOR_TRAINER = PUBLIC_IP_REDIS
+
+# ENVIRONMENT: =======================================================
+
+LIDAR_BLACK_THRESHOLD = [55, 55, 55]  # [88, 88, 88] for tiny road, [55, 55, 55] FOR BASIC ROAD
+REWARD_END_OF_TRACK = 0  # bonus reward at the end of the track
+CONSTANT_PENALTY = 0  # should be <= 0 : added to the reward at each time step
+SLEEP_TIME_AT_RESET = 1.5  # 1.5 to start in a Markov state with the lidar, 0.0 for saving replays
+ACT_BUF_LEN = 2
+IMG_HIST_LEN = 2  # 4 without RNN, 1 with RNN
+
+# DEBUGGING AND BENCHMARKING: ===================================
+
+CRC_DEBUG = False  # Only for checking the consistency of the custom networking methods, set it to False otherwise. Caution: difficult to handle if reset transitions are collected.
+CRC_DEBUG_SAMPLES = 100  # Number of samples collected in CRC_DEBUG mode
+PROFILE_TRAINER = True  # Will profile each epoch in the Trainer when True
+BENCHMARK = False  # The environment will be benchmarked when this is True
+SYNCHRONIZE_CUDA = False  # Set to True for profiling, False otherwise
+
+# FILE SYSTEM: =================================================
+
+PATH_FILE = Path(__file__)  # TODO: this won't work with PyPI or normal install
+print(f"DEBUG: PATH_FILE:{PATH_FILE}")
+PATH_DATA = PATH_FILE.absolute().parent.parent / 'data'
+print(f"DEBUG: PATH_DATA:{PATH_DATA}")
+
+MODEL_HISTORY = 10  # 0 for not saving history, x for saving model history every x new model received by RolloutWorker
+
+MODEL_PATH_WORKER = str(PATH_DATA / "weights" / (RUN_NAME + ".pth"))
+MODEL_PATH_SAVE_HISTORY = str(PATH_DATA / "weights" / (RUN_NAME + "_"))
+MODEL_PATH_TRAINER = str(PATH_DATA / "weights" / (RUN_NAME + "_t.pth"))
+CHECKPOINT_PATH = str(PATH_DATA / "checkpoint" / RUN_NAME)
+DATASET_PATH = str(PATH_DATA / "dataset")
+REWARD_PATH = str(PATH_DATA / "reward" / "reward.pkl")
+
+if PRAGMA_EDOUARD_YANN_CC == 2:  # Override some of these for Compute Canada
+    if PRAGMA_SERVER_ON_EDOUARD_YANN == 1:  # Edouard
+        MODEL_PATH_TRAINER = r"/home/yannbout/scratch/base_tmrl_edouard/data/" + (RUN_NAME + "_t.pth")
+        CHECKPOINT_PATH = r"/home/yannbout/scratch/base_tmrl_edouard/data/" + RUN_NAME
+        REWARD_PATH = r"/home/yannbout/scratch/base_tmrl_edouard/data/reward.pkl"
+    else:  # Yann
+        MODEL_PATH_TRAINER = r"/home/yannbout/scratch/base_tmrl/data/" + (RUN_NAME + "_t.pth")
+        CHECKPOINT_PATH = r"/home/yannbout/scratch/base_tmrl/data/" + RUN_NAME
+        REWARD_PATH = r"/home/yannbout/scratch/base_tmrl/data/reward.pkl"
+elif PRAGMA_EDOUARD_YANN_CC == 3:  # Override some of these for MIST Benchbot
+    MODEL_PATH_TRAINER = r"/home/ybouteiller/base_tmrl/data/" + (RUN_NAME + "_t.pth")
+    CHECKPOINT_PATH = r"/home/ybouteiller/base_tmrl/data/" + RUN_NAME
+    REWARD_PATH = r"/home/ybouteiller/base_tmrl/data/reward.pkl"
+
+# WANDB: =======================================================
+
+WANDB_RUN_ID = RUN_NAME
+WANDB_PROJECT = "tmrl"
+WANDB_ENTITY = "tmrl"
+WANDB_KEY = "df28d4daa98d2df2557d74caf78e40c68adaf288"
+
+os.environ['WANDB_API_KEY'] = WANDB_KEY
+
+# NETWORKING: ==================================================
+
+PRINT_BYTESIZES = True
+
+PORT_TRAINER = 55555  # Port to listen on (non-privileged ports are > 1023)
+PORT_ROLLOUT = 55556  # Port to listen on (non-privileged ports are > 1023)
+BUFFER_SIZE = 536870912  # 268435456  # socket buffer size (200 000 000 is large enough for 1000 images right now)
+HEADER_SIZE = 12  # fixed number of characters used to describe the data length
+
+SOCKET_TIMEOUT_CONNECT_TRAINER = 300.0
+SOCKET_TIMEOUT_ACCEPT_TRAINER = 300.0
+SOCKET_TIMEOUT_CONNECT_ROLLOUT = 300.0
+SOCKET_TIMEOUT_ACCEPT_ROLLOUT = 300.0  # socket waiting for rollout workers closed and restarted at this interval
+SOCKET_TIMEOUT_COMMUNICATE = 30.0
+SELECT_TIMEOUT_OUTBOUND = 30.0
+SELECT_TIMEOUT_PING_PONG = 60.0
+ACK_TIMEOUT_WORKER_TO_REDIS = 300.0
+ACK_TIMEOUT_TRAINER_TO_REDIS = 300.0
+ACK_TIMEOUT_REDIS_TO_WORKER = 300.0
+ACK_TIMEOUT_REDIS_TO_TRAINER = 300.0
+RECV_TIMEOUT_TRAINER_FROM_SERVER = 600.0
+RECV_TIMEOUT_WORKER_FROM_SERVER = 600.0
+WAIT_BEFORE_RECONNECTION = 10.0
+LOOP_SLEEP_TIME = 1.0
