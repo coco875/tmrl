@@ -3,9 +3,9 @@ common:
     RUN_NAME : "SACv1_SPINUP_1_LIDAR_RNN_old_map_test_5"
     save_frequency : 10
     use_wandb : True # if you use wand b setup the config
-    MODEL_PATH_TRAINER : "/home/ybouteiller/base_tmrl/data/SACv1_SPINUP_1_LIDAR_RNN_old_map_test_5_t.pth"
-    CHECKPOINT_PATH : "/home/ybouteiller/base_tmrl/data/SACv1_SPINUP_1_LIDAR_RNN_old_map_test_5"
-    REWARD_PATH : "/home/ybouteiller/base_tmrl/data/reward.pkl"
+    MODEL_PATH_TRAINER : "/home/yannbout/scratch/base_tmrl/data/SACv1_SPINUP_1_LIDAR_RNN_old_map_test_5_t.pth"
+    CHECKPOINT_PATH : "/home/yannbout/scratch/base_tmrl/data/SACv1_SPINUP_1_LIDAR_RNN_old_map_test_5"
+    REWARD_PATH : "/home/yannbout/scratch/base_tmrl/data/reward.pkl"
 
 server:
     ip : "173.179.182.4" # edi:"173.179.182.4" yann : "45.74.221.204"
@@ -17,9 +17,5 @@ worker:
 trainer:
     cuda : True
     localhost : False # is the trainer in the same machine that the server
-
-
-
-
 
 

@@ -107,17 +107,6 @@ if cfg.PRAGMA_DCAC:  # DCAC
         reward_scale=2.0,  # 2.0,  # default: 5.0, best tmnf so far: 0.1, best tm20 so far: 2.0
         entropy_scale=1.0)  # default: 1.0),  # default: 1.0
 else:  # SAC
-    # AGENT = partial(
-    #     SAC_Agent,
-    #     OutputNorm=partial(beta=0., zero_debias=False),
-    #     device='cuda' if cfg.PRAGMA_CUDA_TRAINING else 'cpu',
-    #     Model=partial(TRAIN_MODEL, act_buf_len=cfg.ACT_BUF_LEN),
-    #     lr_actor=0.0003,
-    #     lr_critic=0.0001,  # default 0.0003
-    #     discount=0.995,  # default and best tmnf so far: 0.99
-    #     target_update=0.001,  # default 0.005
-    #     reward_scale=2.0,  # 2.0,  # default: 5.0, best tmnf so far: 0.1, best tm20 so far: 2.0
-    #     entropy_scale=1.0)  # default: 1.0),  # default: 1.0
 
     AGENT = partial(
         SAC_Agent,

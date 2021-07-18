@@ -127,3 +127,4 @@ dmypy.json
 *.pth
 
 *.idea
+git-sizer.exe
