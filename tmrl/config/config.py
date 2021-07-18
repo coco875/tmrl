@@ -1,12 +1,5 @@
 import yaml
 import pprint
-
-
-import os
-from pathlib import Path
-# third-party imports
-# from tmrl.custom.custom_checkpoints import load_run_instance_images_dataset, dump_run_instance_images_dataset
-# third-party imports
 import numpy as np
 import rtgym
 
@@ -36,11 +29,197 @@ from tmrl.sac_models import (RNNActorCritic, SquashedGaussianRNNActor)
 from tmrl.spinup_sac import SpinupSacAgent as SAC_Agent
 from tmrl.util import partial
 
-
 def read_yaml(file_path):
     with open(file_path, "r") as f:
         return yaml.safe_load(f)
 
+def prosess_cfg(cfg):
 
-yaml_content = read_yaml("example.yaml")
-pprint.pprint(yaml_content)
+    if cfg.PRAGMA_DCAC:
+        TRAIN_MODEL = SV_Mlp
+        POLICY = SV_MlpPolicy
+    else:
+        # TRAIN_MODEL = Mlp if cfg.PRAGMA_LIDAR else Tm_hybrid_1
+        # POLICY = MlpPolicy if cfg.PRAGMA_LIDAR else TMPolicy
+        assert cfg.PRAGMA_LIDAR
+        # TRAIN_MODEL = MLPActorCritic
+        # POLICY = SquashedGaussianMLPActor
+        TRAIN_MODEL = RNNActorCritic
+        POLICY = SquashedGaussianRNNActor
+
+    if cfg.PRAGMA_LIDAR:
+        INT = partial(TM2020InterfaceLidar, img_hist_len=cfg.IMG_HIST_LEN,
+                      gamepad=cfg.PRAGMA_GAMEPAD) if cfg.PRAGMA_TM2020_TMNF else partial(TMInterfaceLidar,
+                                                                                         img_hist_len=cfg.IMG_HIST_LEN)
+    else:
+        INT = partial(TM2020Interface, img_hist_len=cfg.IMG_HIST_LEN,
+                      gamepad=cfg.PRAGMA_GAMEPAD) if cfg.PRAGMA_TM2020_TMNF else partial(TMInterface,
+                                                                                         img_hist_len=cfg.IMG_HIST_LEN)
+
+    CONFIG_DICT = rtgym.DEFAULT_CONFIG_DICT
+    CONFIG_DICT["interface"] = INT
+    CONFIG_DICT["time_step_duration"] = 0.05
+    CONFIG_DICT["start_obs_capture"] = 0.04  # /!\ lidar capture takes 0.03s
+    CONFIG_DICT["time_step_timeout_factor"] = 1.0
+    CONFIG_DICT["ep_max_length"] = np.inf
+    CONFIG_DICT["real_time"] = True
+    CONFIG_DICT["async_threading"] = True
+    CONFIG_DICT["act_in_obs"] = True  # ACT_IN_OBS
+    CONFIG_DICT["act_buf_len"] = cfg.ACT_BUF_LEN
+    CONFIG_DICT["benchmark"] = cfg.BENCHMARK
+    CONFIG_DICT["wait_on_done"] = True
+
+    # to compress a sample before sending it over the local network/Internet:
+    SAMPLE_COMPRESSOR = get_local_buffer_sample_lidar if cfg.PRAGMA_LIDAR else get_local_buffer_sample_tm20_imgs
+    # to preprocess observations that come out of the gym environment and of the replay buffer:
+    OBS_PREPROCESSOR = obs_preprocessor_tm_lidar_act_in_obs if cfg.PRAGMA_LIDAR else obs_preprocessor_tm_act_in_obs
+    # to augment data that comes out of the replay buffer (applied after observation preprocessing):
+    SAMPLE_PREPROCESSOR = None
+
+    if cfg.PRAGMA_LIDAR:
+        if cfg.PRAGMA_RNN:
+            if cfg.PRAGMA_DCAC:
+                assert False, "DCAC not implemented here"
+            else:
+                MEM = SeqMemoryTMNFLidar
+        else:
+            MEM = TrajMemoryTMNFLidar if cfg.PRAGMA_DCAC else MemoryTMNFLidar
+    else:
+        assert not cfg.PRAGMA_DCAC, "DCAC not implemented here"
+        assert not cfg.PRAGMA_RNN, "RNNs not supported here"
+        MEM = MemoryTM2020RAM if cfg.PRAGMA_TM2020_TMNF else MemoryTMNF
+
+    MEMORY = partial(MEM,
+                     path_loc=cfg.DATASET_PATH,
+                     imgs_obs=cfg.IMG_HIST_LEN,
+                     act_buf_len=cfg.ACT_BUF_LEN,
+                     sample_preprocessor=None if cfg.PRAGMA_DCAC else SAMPLE_PREPROCESSOR,
+                     crc_debug=cfg.CRC_DEBUG,
+                     use_dataloader=True,
+                     pin_memory=True)
+
+    # ALGORITHM: ===================================================
+
+    if cfg.PRAGMA_DCAC:  # DCAC
+        AGENT = partial(
+            DCAC_Agent,
+            Interface=Tm20rtgymDcacInterface,
+            OutputNorm=partial(beta=0., zero_debias=False),
+            device='cuda' if cfg.PRAGMA_CUDA_TRAINING else 'cpu',
+            Model=partial(TRAIN_MODEL, act_buf_len=cfg.ACT_BUF_LEN),
+            lr_actor=0.0003,
+            lr_critic=0.0003,  # default 0.0003
+            discount=0.995,  # default and best tmnf so far: 0.99
+            target_update=0.005,
+            reward_scale=2.0,  # 2.0,  # default: 5.0, best tmnf so far: 0.1, best tm20 so far: 2.0
+            entropy_scale=1.0)  # default: 1.0),  # default: 1.0
+    else:  # SAC
+        # AGENT = partial(
+        #     SAC_Agent,
+        #     OutputNorm=partial(beta=0., zero_debias=False),
+        #     device='cuda' if cfg.PRAGMA_CUDA_TRAINING else 'cpu',
+        #     Model=partial(TRAIN_MODEL, act_buf_len=cfg.ACT_BUF_LEN),
+        #     lr_actor=0.0003,
+        #     lr_critic=0.0001,  # default 0.0003
+        #     discount=0.995,  # default and best tmnf so far: 0.99
+        #     target_update=0.001,  # default 0.005
+        #     reward_scale=2.0,  # 2.0,  # default: 5.0, best tmnf so far: 0.1, best tm20 so far: 2.0
+        #     entropy_scale=1.0)  # default: 1.0),  # default: 1.0
+
+        AGENT = partial(
+            SAC_Agent,
+            device='cuda' if cfg.PRAGMA_CUDA_TRAINING else 'cpu',
+            Model=partial(TRAIN_MODEL, act_buf_len=cfg.ACT_BUF_LEN),
+            lr_actor=0.0003,
+            lr_critic=0.00005,  # 0.0001 # default 0.0003
+            lr_entropy=0.0003,
+            gamma=0.995,  # default and best tmnf so far: 0.99
+            polyak=0.995,  # 0.999 # default 0.995
+            learn_entropy_coef=False,  # False for SAC v2 with no temperature autotuning
+            target_entropy=-7.0,  # None for automatic
+            alpha=1.0 / 2.7)  # best: 1 / 2.5  # inverse of reward scale
+
+    # TRAINER: =====================================================
+
+    def sac_v2_entropy_scheduler(agent, epoch):
+        start_ent = -0.0
+        end_ent = -7.0
+        end_epoch = 200
+        if epoch <= end_epoch:
+            agent.entopy_target = start_ent + (end_ent - start_ent) * epoch / end_epoch
+
+    if cfg.PRAGMA_LIDAR:  # lidar
+        TRAINER = partial(
+            TrainingOffline,
+            Env=partial(UntouchedGymEnv, id="rtgym:real-time-gym-v0", gym_kwargs={"config": CONFIG_DICT}),
+            Memory=MEMORY,
+            memory_size=1000000,
+            batchsize=64,  # RTX3080: 256 up to 1024
+            epochs=10000,  # 400
+            rounds=10,  # 10
+            steps=1000,  # 1000
+            update_model_interval=1000,
+            update_buffer_interval=1000,
+            max_training_steps_per_env_step=4.0,  # 1.0
+            profiling=cfg.PROFILE_TRAINER,
+            Agent=AGENT,
+            agent_scheduler=None,  # sac_v2_entropy_scheduler
+            start_training=0)  # set this > 0 to start from an existing policy (fills the buffer up to this number of samples before starting training)
+    else:  # images
+        TRAINER = partial(
+            TrainingOffline,
+            Env=partial(UntouchedGymEnv, id="rtgym:real-time-gym-v0", gym_kwargs={"config": CONFIG_DICT}),
+            Memory=MEMORY,
+            memory_size=1000000,
+            batchsize=128,  # 128
+            epochs=100000,  # 10
+            rounds=10,  # 50
+            steps=50,  # 2000
+            update_model_interval=50,
+            update_buffer_interval=1,
+            max_training_steps_per_env_step=1.0,
+            profiling=cfg.PROFILE_TRAINER,
+            Agent=AGENT)
+
+    # CHECKPOINTS: ===================================================
+
+    DUMP_RUN_INSTANCE_FN = None if cfg.PRAGMA_LIDAR else None  # dump_run_instance_images_dataset
+    LOAD_RUN_INSTANCE_FN = None if cfg.PRAGMA_LIDAR else None  # load_run_instance_images_dataset
+
+
+def load_config(file_path):
+    cfg_profile = read_yaml(file_path)
+    pprint.pprint(cfg_profile)
+    cfg_basic = read_yaml("basic_config.yaml")
+    pprint.pprint(cfg_basic)
+
+def mergecfg(cfg_profile, cfg_basic):
+
+    if cfg_profile['worker']['localhost']:
+        cfg_basic['REDIS_IP_FOR_WORKER'] = "127.0.0.1"
+    else:
+        cfg_basic['REDIS_IP_FOR_WORKER'] = cfg_profile['server']['ip']
+
+    if cfg_profile['trainer']['localhost']:
+        cfg_basic['REDIS_IP_FOR_WORKER'] = "127.0.0.1"
+    else:
+        cfg_basic['REDIS_IP_FOR_WORKER'] = cfg_profile['server']['ip']
+
+
+
+
+
+    #prosess_cfg(cfg)
+
+    # dict to object
+    # cfg = Struct(**cfg)
+
+class Struct:
+    def __init__(self, **entries):
+        self.__dict__.update(entries)
+
+
+if __name__ == "__main__":
+    load_config("example.yaml")
+
+

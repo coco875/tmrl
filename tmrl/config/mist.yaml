@@ -4,6 +4,11 @@ common:
     save_frequency : 10
     use_wandb : True # if you use wand b setup the config
 
+    MODEL_PATH_TRAINER: r"/home/ybouteiller/base_tmrl/data/" + (RUN_NAME + "_t.pth")
+    CHECKPOINT_PATH: r"/home/ybouteiller/base_tmrl/data/" + RUN_NAME
+    REWARD_PATH: r"/home/ybouteiller/base_tmrl/data/reward.pkl"
+
+
 server:
     ip : "173.179.182.4" # edi:"173.179.182.4" yann : "45.74.221.204"
 
@@ -14,3 +19,9 @@ worker:
 trainer:
     cuda : True
     localhost : False # is the trainer in the same machine that the server
+
+
+
+
+
+
