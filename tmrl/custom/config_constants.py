@@ -69,9 +69,9 @@ if PRAGMA_EDOUARD_YANN_CC == 2:  # Override some of these for Compute Canada
         CHECKPOINT_PATH = r"/home/yannbout/scratch/base_tmrl/data/" + RUN_NAME
         REWARD_PATH = r"/home/yannbout/scratch/base_tmrl/data/reward.pkl"
 elif PRAGMA_EDOUARD_YANN_CC == 3:  # Override some of these for MIST Benchbot
-    MODEL_PATH_TRAINER = r"/home/ybouteiller/base_tmrl/data/" + (RUN_NAME + "_t.pth")
-    CHECKPOINT_PATH = r"/home/ybouteiller/base_tmrl/data/" + RUN_NAME
-    REWARD_PATH = r"/home/ybouteiller/base_tmrl/data/reward.pkl"
+    MODEL_PATH_TRAINER = r"/home/ybouteiller/tmrl/data/" + (RUN_NAME + "_t.pth")
+    CHECKPOINT_PATH = r"/home/ybouteiller/tmrl/data/" + RUN_NAME
+    REWARD_PATH = r"/home/ybouteiller/tmrl/data/reward.pkl"
 
 # WANDB: =======================================================
 
